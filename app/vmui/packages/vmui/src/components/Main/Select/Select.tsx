@@ -19,6 +19,7 @@ interface SelectProps {
   searchable?: boolean
   autofocus?: boolean
   disabled?: boolean
+  includeAll?: boolean
   onChange: (value: string) => void
 }
 
@@ -31,6 +32,7 @@ const Select: FC<SelectProps> = ({
   clearable = false,
   searchable = false,
   autofocus,
+  includeAll,
   disabled,
   onChange
 }) => {
@@ -45,7 +47,7 @@ const Select: FC<SelectProps> = ({
   const inputRef = useRef<HTMLInputElement>(null);
 
   const isMultiple = Array.isArray(value);
-  const selectedValues = Array.isArray(value) ? value : undefined;
+  const selectedValues = Array.isArray(value) ? value.slice() : [];
   const hideInput = isMobile && isMultiple && !!selectedValues?.length;
 
   const textFieldValue = useMemo(() => {
@@ -118,6 +120,9 @@ const Select: FC<SelectProps> = ({
   useEventListener("keyup", handleKeyUp);
   useClickOutside(autocompleteAnchorEl, handleCloseList, wrapperRef);
 
+  includeAll && !list.includes("All") && list.push("All");
+  includeAll && !selectedValues?.length && selectedValues.push("All");
+
   return (
     <div
       className={classNames({
@@ -138,7 +143,7 @@ const Select: FC<SelectProps> = ({
               onRemoveItem={handleSelected}
             />
           )}
-          {!hideInput && (
+          {!hideInput && !selectedValues?.length && (
             <input
               value={textFieldValue}
               type="text"
@@ -172,7 +177,7 @@ const Select: FC<SelectProps> = ({
       <Autocomplete
         label={label}
         value={autocompleteValue}
-        options={list.map(el => ({ value: el }))}
+        options={list.map(l => ({ value: l }))}
         anchor={autocompleteAnchorEl}
         selected={selectedValues}
         minLength={1}

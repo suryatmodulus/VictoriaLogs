@@ -1,6 +1,9 @@
 const router = {
   home: "/",
   icons: "/icons",
+  alerts: "/alerts",
+  rules: "/groups",
+  notifiers: "/notifiers"
 };
 
 export interface RouterOptionsHeader {
@@ -24,6 +27,18 @@ export const routerOptions: { [key: string]: RouterOptions } = {
   },
   [router.icons]: {
     title: "Icons",
+    header: {}
+  },
+  [router.alerts]: {
+    title: "Alerts",
+    header: {}
+  },
+  [router.rules]: {
+    title: "Rules",
+    header: {}
+  },
+  [router.notifiers]: {
+    title: "Notifiers",
     header: {}
   },
 };

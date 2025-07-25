@@ -9,6 +9,7 @@ import router, { routerOptions } from "../../router";
 import useDeviceDetect from "../../hooks/useDeviceDetect";
 import ControlsLogsLayout from "./ControlsLogsLayout";
 import { footerLinksToLogs } from "../../constants/footerLinks";
+import useFetchFlags from "../../hooks/useFetchFlags";
 
 const LogsLayout: FC = () => {
   const appModeEnable = getAppModeEnable();
@@ -22,6 +23,7 @@ const LogsLayout: FC = () => {
   };
 
   useEffect(setDocumentTitle, [pathname]);
+  useFetchFlags();
 
   return <section className="vm-container">
     <Header controlsComponent={ControlsLogsLayout}/>

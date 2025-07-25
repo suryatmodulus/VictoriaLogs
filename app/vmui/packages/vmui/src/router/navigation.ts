@@ -14,11 +14,32 @@ export interface NavigationItem {
 }
 
 /**
+ * Submenu for Alerts tab
+ */
+
+const getAlertsNav = () => [
+  { value: router.rules },
+  { value: router.alerts },
+  { value: router.notifiers },
+];
+
+interface NavigationConfig {
+  showAlertLink: boolean,
+}
+
+/**
  * VictoriaLogs navigation menu
  */
-export const getLogsNavigation = (): NavigationItem[] => [
+export const getLogsNavigation = ({
+  showAlertLink,
+}: NavigationConfig): NavigationItem[] => [
   {
     label: routerOptions[router.home].title,
     value: router.home,
+  },
+  {
+    value: "Alerts",
+    submenu: getAlertsNav(),
+    hide: !showAlertLink,
   },
 ];

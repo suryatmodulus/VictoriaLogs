@@ -185,3 +185,71 @@ export interface GroupLogsType {
 }
 
 export type Order = "asc" | "desc";
+
+export interface RuleType {
+  id: string,
+  title: string,
+  isDefault?: boolean,
+}
+
+export interface Group {
+  name: string
+  file: string
+  rules: Rule[]
+  interval: number
+  limit: number
+  evaluationTime: number
+  type: string
+  id: string
+  concurrency: number
+  params: string[]
+  headers: string[]
+  notifierHeaders: string[]
+  labels: Record<string, string>
+  evalOffset: number
+  evalDelay: number
+  states: Record<string, number>
+}
+
+export interface Rule {
+  state: string
+  name: string
+  query: string
+  duration: number
+  keepFiringFor: number
+  labels: Record<string, string>
+  annotations: Record<string, string>
+  alerts: Alert[]
+  health: string
+  lastEvaluation: number
+  lastError: string
+  evaluationTime: number
+  type: string
+  datasourceType: string
+  lastSamples: bigint
+  lastSeriesFetched: bigint
+  id: string
+  debug: boolean
+}
+
+export interface Alert {
+  state: string
+  value: string
+  labels: Record<string, string>
+  annotations: Record<string, string>
+  activeAt: number
+  id: string
+  source: string
+  restored: boolean
+  stabilizing: boolean
+}
+
+export interface Notifier {
+  kind: string
+  targets: Target[]
+}
+
+export interface Target {
+  address: string
+  labels: Record<string, string>
+}

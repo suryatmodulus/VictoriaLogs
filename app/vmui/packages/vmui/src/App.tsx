@@ -4,7 +4,10 @@ import AppContextProvider from "./contexts/AppContextProvider";
 import ThemeProvider from "./components/Main/ThemeProvider/ThemeProvider";
 import ExploreLogs from "./pages/ExploreLogs/ExploreLogs";
 import LogsLayout from "./layouts/LogsLayout/LogsLayout";
+import ExploreRules from "./pages/ExploreAlerts/ExploreRules";
+import ExploreNotifiers from "./pages/ExploreAlerts/ExploreNotifiers";
 import "./constants/markedPlugins";
+import router from "./router";
 
 const App: FC = () => {
   const [loadedTheme, setLoadedTheme] = useState(false);
@@ -23,6 +26,22 @@ const App: FC = () => {
                 <Route
                   path={"/"}
                   element={<ExploreLogs/>}
+                />
+                <Route
+                  path={router.rules}
+                  element={<ExploreRules
+                    ruleTypeFilter=""
+                  />}
+                />
+                <Route
+                  path={router.alerts}
+                  element={<ExploreRules
+                    ruleTypeFilter="alert"
+                  />}
+                />
+                <Route
+                  path={router.notifiers}
+                  element={<ExploreNotifiers/>}
                 />
               </Route>
             </Routes>
