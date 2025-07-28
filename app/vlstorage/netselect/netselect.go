@@ -61,7 +61,7 @@ const (
 	// It must be updated every time the protocol changes.
 	QueryProtocolVersion = "v1"
 
-	// DeleteProtocolVersion is the version of the protocol used for /internal/select/delete HTTP endpoint.
+	// DeleteProtocolVersion is the version of the protocol used for /internal/delete HTTP endpoint.
 	// It must be updated every time the protocol changes.
 	DeleteProtocolVersion = "v1"
 )
@@ -494,7 +494,7 @@ func unmarshalValuesWithHits(src []byte) ([]logstorage.ValueWithHits, error) {
 func (sn *storageNode) deleteRows(ctx context.Context, tenantIDs []logstorage.TenantID, q *logstorage.Query) error {
 	args := sn.getCommonArgs(DeleteProtocolVersion, tenantIDs, q)
 
-	reqURL := sn.getRequestURL("/internal/select/delete", args)
+	reqURL := sn.getRequestURL("/internal/delete", args)
 	req, err := http.NewRequestWithContext(ctx, "POST", reqURL, nil)
 	if err != nil {
 		return err

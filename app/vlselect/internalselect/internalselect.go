@@ -49,7 +49,6 @@ var requestHandlers = map[string]func(ctx context.Context, w http.ResponseWriter
 	"/internal/select/stream_field_values": processStreamFieldValuesRequest,
 	"/internal/select/streams":             processStreamsRequest,
 	"/internal/select/stream_ids":          processStreamIDsRequest,
-	"/internal/select/delete":              processDeleteRequest,
 }
 
 func processQueryRequest(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
@@ -241,20 +240,6 @@ func processStreamIDsRequest(ctx context.Context, w http.ResponseWriter, r *http
 	}
 
 	return writeValuesWithHits(w, streamIDs, cp.DisableCompression)
-}
-
-func processDeleteRequest(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
-	cp, err := getCommonParams(r, netselect.DeleteProtocolVersion)
-	if err != nil {
-		return err
-	}
-
-	if err := vlstorage.DeleteRows(ctx, cp.TenantIDs, cp.Query); err != nil {
-		return err
-	}
-
-	_, _ = w.Write([]byte("ok"))
-	return nil
 }
 
 type commonParams struct {
