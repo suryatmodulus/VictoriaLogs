@@ -519,7 +519,6 @@ func (s *Storage) DeleteRows(ctx context.Context, tenantIDs []logstorage.TenantI
 	var wg sync.WaitGroup
 	errCh := make(chan error, len(s.sns))
 	for _, sn := range s.sns {
-		sn := sn
 		wg.Add(1)
 		go func() {
 			defer wg.Done()

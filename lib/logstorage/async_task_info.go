@@ -10,6 +10,10 @@ type AsyncTaskInfo struct {
 	Status  string             `json:"status"`
 	Tenant  string             `json:"tenant"`
 	Payload asyncDeletePayload `json:"payload"`
+
+	CreatedTime int64  `json:"createdTime,omitempty"`
+	DoneTime    int64  `json:"doneTime,omitempty"`
+	Error       string `json:"error,omitempty"`
 }
 
 // ListAsyncTasks gathers information about all async tasks known to this
@@ -54,11 +58,14 @@ func (s *Storage) ListAsyncTasks() []AsyncTaskInfo {
 			}
 
 			info := AsyncTaskInfo{
-				Seq:     t.Seq,
-				Type:    asyncTaskTypeString(t.Type),
-				Status:  asyncTaskStatusString(t.Status),
-				Tenant:  tenantStr,
-				Payload: t.Payload,
+				Seq:         t.Seq,
+				Type:        asyncTaskTypeString(t.Type),
+				Status:      asyncTaskStatusString(t.Status),
+				Tenant:      tenantStr,
+				Payload:     t.Payload,
+				CreatedTime: t.CreatedTime,
+				DoneTime:    t.DoneTime,
+				Error:       t.ErrorMsg,
 			}
 			out = append(out, info)
 		}

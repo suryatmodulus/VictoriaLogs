@@ -262,6 +262,10 @@ func processForceFlush(w http.ResponseWriter, r *http.Request) bool {
 }
 
 func processDeleteRequest(w http.ResponseWriter, r *http.Request) bool {
+	if localStorage == nil {
+		return true
+	}
+
 	ctx := r.Context()
 
 	// Extract tenantID
@@ -330,20 +334,26 @@ var asyncTasksTmpl = template.Must(template.New("asyncTasks").Parse(`
 	<table>
 		<thead>
 			<tr>
+				<th style="width:180px;">Created</th>
 				<th style="width:70px;">Seq</th>
 				<th style="width:140px;">Type</th>
 				<th style="width:120px;">Status</th>
 				<th style="width:160px;">Tenant</th>
+				<th style="width:180px;">Done</th>
+				<th style="width:240px;">Result</th>
 				<th>Payload</th>
 			</tr>
 		</thead>
 		<tbody>
 			{{- range .Tasks }}
 			<tr>
+				<td>{{ .Created }}</td>
 				<td>{{ .Seq }}</td>
 				<td>{{ .Type }}</td>
 				<td><span class="status {{ .Status }}">{{ .Status }}</span></td>
 				<td>{{ html .Tenant }}</td>
+				<td>{{ .Done }}</td>
+				<td><pre>{{ html .Result }}</pre></td>
 				<td><pre>{{ html .PayloadJSON }}</pre></td>
 			</tr>
 			{{- end }}
@@ -357,7 +367,7 @@ var asyncTasksTmpl = template.Must(template.New("asyncTasks").Parse(`
 </html>
 `))
 
-func processAsyncTasks(w http.ResponseWriter, _ *http.Request) bool {
+func processAsyncTasks(w http.ResponseWriter, r *http.Request) bool {
 	if localStorage == nil {
 		return false // only in local mode
 	}
@@ -370,6 +380,9 @@ func processAsyncTasks(w http.ResponseWriter, _ *http.Request) bool {
 		Status      string
 		Tenant      string
 		PayloadJSON string
+		Created     string
+		Done        string
+		Result      string
 	}
 	vm := struct {
 		Tasks []row
@@ -377,20 +390,37 @@ func processAsyncTasks(w http.ResponseWriter, _ *http.Request) bool {
 
 	for _, t := range tasks {
 		payloadJSON, _ := json.Marshal(t.Payload)
+
+		createdStr := time.Unix(0, t.CreatedTime).Format(time.RFC3339)
+
+		done := "-"
+		if t.DoneTime > 0 {
+			done = time.Unix(0, t.DoneTime).Format(time.RFC3339)
+		}
+
+		result := t.Error
+		if t.Status == "success" {
+			result = "OK"
+		}
+
 		vm.Tasks = append(vm.Tasks, row{
 			Seq:         t.Seq,
 			Type:        t.Type,
 			Status:      t.Status,
 			Tenant:      t.Tenant,
 			PayloadJSON: string(payloadJSON),
+			Created:     createdStr,
+			Done:        done,
+			Result:      result,
 		})
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := asyncTasksTmpl.Execute(w, vm); err != nil {
-		logger.Errorf("render async tasks: %s", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		httpserver.Errorf(w, r, "internal error: %s", err)
+		return true
 	}
+
 	return true
 }
 

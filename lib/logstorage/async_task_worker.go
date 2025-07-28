@@ -132,7 +132,7 @@ func (s *Storage) runAsyncTasksOnce(ctx context.Context) (uint64, error) {
 			return seq, nil
 		}
 
-		s.setTaskAsDone(oudatedPtws, task.Seq, taskSuccess, false)
+		s.setTaskAsDone(oudatedPtws, task.Seq, taskSuccess, false, nil)
 		return seq, nil
 	}
 
@@ -155,7 +155,7 @@ func (s *Storage) runAsyncTasksOnce(ctx context.Context) (uint64, error) {
 	}
 
 	if pending == 0 {
-		s.setTaskAsDone(oudatedPtws, task.Seq, taskSuccess, false)
+		s.setTaskAsDone(oudatedPtws, task.Seq, taskSuccess, false, nil)
 	}
 
 	logger.Infof("DEBUG (task): task (seq=%d, query=%q) applied to %d parts", task.Seq, task.Payload.Query, len(lagging))
@@ -176,14 +176,14 @@ func (s *Storage) failAsyncTask(sequence uint64, err error) {
 	s.partitionsLock.Unlock()
 
 	// Mark the tasks as error for partitions and parts
-	s.setTaskAsDone(ptws, sequence, taskError, true)
+	s.setTaskAsDone(ptws, sequence, taskError, true, err)
 
 	for _, ptw := range ptws {
 		ptw.decRef()
 	}
 }
 
-func (s *Storage) setTaskAsDone(ptws []*partitionWrapper, taskSeq uint64, ats asyncTaskStatus, includeParts bool) {
+func (s *Storage) setTaskAsDone(ptws []*partitionWrapper, taskSeq uint64, ats asyncTaskStatus, includeParts bool, err error) {
 	for _, ptw := range ptws {
 		pt := ptw.pt
 
@@ -201,7 +201,7 @@ func (s *Storage) setTaskAsDone(ptws []*partitionWrapper, taskSeq uint64, ats as
 			pt.ddb.partsLock.Unlock()
 		}
 
-		pt.ats.markResolvedSync(taskSeq, ats)
+		pt.ats.markResolvedSync(taskSeq, ats, err)
 	}
 
 	logger.Infof("DEBUG (task): setTaskAsDone: taskSeq=%d, ats=%s, includeParts=%t", taskSeq, ats, includeParts)

@@ -27,14 +27,14 @@ const (
 )
 
 type asyncTask struct {
-	Type      asyncTaskType      `json:"type"`
-	TenantIDs []TenantID         `json:"tenantIDs,omitempty"` // affected tenants (empty slice = all)
-	Payload   asyncDeletePayload `json:"payload"`             // task-specific parameters
-	Seq       uint64             `json:"seq,omitempty"`       // monotonically increasing *global* sequence
-
-	// Status tracks the last execution state; omitted from JSON when zero (pending) to
-	// preserve compatibility with tasks created before this field existed.
-	Status asyncTaskStatus `json:"status,omitempty"`
+	Type        asyncTaskType      `json:"type"`                  // task type (delete, etc.)
+	TenantIDs   []TenantID         `json:"tenantIDs,omitempty"`   // affected tenants
+	Payload     asyncDeletePayload `json:"payload"`               // task parameters
+	Seq         uint64             `json:"seq,omitempty"`         // global sequence number
+	Status      asyncTaskStatus    `json:"status,omitempty"`      // pending/success/error
+	CreatedTime int64              `json:"createdTime,omitempty"` // creation time (UnixNano)
+	DoneTime    int64              `json:"doneTime,omitempty"`    // completion time (UnixNano)
+	ErrorMsg    string             `json:"error,omitempty"`       // last error message
 }
 
 // asyncDeletePayload contains parameters for async tasks.
@@ -92,13 +92,17 @@ func unmarshalAsyncTasks(data []byte) ([]asyncTask, error) {
 // markResolvedSync updates task status and persists the change to disk.
 // It holds the internal mutex only for in‐memory modification; the slow fs write
 // is executed after the lock is released to avoid blocking other readers.
-func (at *asyncTasks) markResolvedSync(seq uint64, status asyncTaskStatus) {
+func (at *asyncTasks) markResolvedSync(seq uint64, status asyncTaskStatus, err error) {
 	var updated bool
 
 	at.mu.Lock()
 	for i := len(at.ts) - 1; i >= 0; i-- {
 		if at.ts[i].Seq == seq && at.ts[i].Status == taskPending {
 			at.ts[i].Status = status
+			at.ts[i].DoneTime = time.Now().UnixNano()
+			if status == taskError && err != nil {
+				at.ts[i].ErrorMsg = err.Error()
+			}
 			updated = true
 			break
 		}
@@ -113,11 +117,12 @@ func (at *asyncTasks) markResolvedSync(seq uint64, status asyncTaskStatus) {
 // addDeleteTask appends a delete task to the partition's task list
 func (at *asyncTasks) addDeleteTaskSync(tenantIDs []TenantID, q *Query, seq uint64) uint64 {
 	task := asyncTask{
-		Seq:       seq,
-		Type:      asyncTaskDelete,
-		TenantIDs: append([]TenantID(nil), tenantIDs...),
-		Payload:   asyncDeletePayload{Query: q.String()},
-		Status:    taskPending,
+		Seq:         seq,
+		Type:        asyncTaskDelete,
+		TenantIDs:   append([]TenantID(nil), tenantIDs...),
+		Payload:     asyncDeletePayload{Query: q.String()},
+		Status:      taskPending,
+		CreatedTime: time.Now().UnixNano(),
 	}
 
 	at.mu.Lock()

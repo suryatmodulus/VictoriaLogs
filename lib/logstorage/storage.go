@@ -807,8 +807,13 @@ func durationToDays(d time.Duration) int64 {
 }
 
 func ValidateDeleteQuery(q *Query) error {
-	if q.pipes != nil {
-		return fmt.Errorf("query must not contain pipes")
+	if len(q.pipes) > 0 {
+		// Only `limit` pipe is allowed for delete queries.
+		for _, p := range q.pipes {
+			if _, ok := p.(*pipeLimit); !ok {
+				return fmt.Errorf("delete supports only | limit N pipe")
+			}
+		}
 	}
 
 	if q.f == nil {
@@ -855,7 +860,11 @@ func (s *Storage) markDeleteRowsOnParts(ctx context.Context, tenantIDs []TenantI
 		return fmt.Errorf("parse query: %w", err)
 	}
 	if len(q.pipes) > 0 {
-		return fmt.Errorf("query must not contain pipes")
+		for _, p := range q.pipes {
+			if _, ok := p.(*pipeLimit); !ok {
+				return fmt.Errorf("delete supports only | limit N pipe")
+			}
+		}
 	}
 
 	minTs, maxTs := q.GetFilterTimeRange()
