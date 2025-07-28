@@ -25,6 +25,8 @@ type inmemoryPart struct {
 
 	messageBloomValues bloomValuesBuffer
 	fieldBloomValues   bloomValuesBuffer
+
+	deleteMarker deleteMarker
 }
 
 type bloomValuesBuffer struct {
@@ -65,6 +67,9 @@ func (mp *inmemoryPart) reset() {
 
 	mp.messageBloomValues.reset()
 	mp.fieldBloomValues.reset()
+
+	// Drop any attached deleteMarker.
+	mp.deleteMarker = deleteMarker{}
 }
 
 // mustInitFromRows initializes mp from lr.
@@ -132,6 +137,13 @@ func (mp *inmemoryPart) MustStoreToDisk(path string) {
 
 	psw.Add(messageBloomFilterPath, &mp.messageBloomValues.bloom)
 	psw.Add(messageValuesPath, &mp.messageBloomValues.values)
+
+	// Persist delete-marker data if present.
+	if len(mp.deleteMarker.blockIDs) > 0 {
+		datBuf := mp.deleteMarker.Marshal(nil)
+		datPath := filepath.Join(path, rowMarkerDatFilename)
+		fs.MustWriteSync(datPath, datBuf)
+	}
 
 	bloomPath := getBloomFilePath(path, 0)
 	psw.Add(bloomPath, &mp.fieldBloomValues.bloom)

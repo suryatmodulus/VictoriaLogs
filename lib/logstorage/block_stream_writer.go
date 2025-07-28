@@ -211,6 +211,15 @@ type blockStreamWriter struct {
 	// streamWriters contains writer for block data
 	streamWriters streamWriters
 
+	// partPath is non-empty when writing a file-based part.
+	partPath string
+
+	// mp points to the destination in-memory part when writing an in-memory part.
+	mp *inmemoryPart
+
+	// dm accumulates per-block delete markers generated while writing.
+	dm deleteMarker
+
 	// sidLast is the streamID for the last written block
 	sidLast streamID
 
@@ -252,6 +261,9 @@ type blockStreamWriter struct {
 
 	// indexBlockHeader is used for marshaling the data to metaindexData
 	indexBlockHeader indexBlockHeader
+
+	// lastBlockID is the columnsHeaderOffset of the most recently written block.
+	lastBlockID uint64
 }
 
 // reset resets bsw for subsequent reuse.
@@ -269,6 +281,7 @@ func (bsw *blockStreamWriter) reset() {
 	bsw.globalMinTimestamp = 0
 	bsw.globalMaxTimestamp = 0
 	bsw.indexBlockData = bsw.indexBlockData[:0]
+	bsw.lastBlockID = 0
 
 	if len(bsw.metaindexData) > 1024*1024 {
 		// The length of bsw.metaindexData is unbound, so drop too long buffer
@@ -279,11 +292,17 @@ func (bsw *blockStreamWriter) reset() {
 	}
 
 	bsw.indexBlockHeader.reset()
+
+	bsw.partPath = ""
+	bsw.mp = nil
+	bsw.dm = deleteMarker{}
 }
 
 // MustInitForInmemoryPart initializes bsw from mp
 func (bsw *blockStreamWriter) MustInitForInmemoryPart(mp *inmemoryPart) {
 	bsw.reset()
+
+	bsw.mp = mp
 
 	messageBloomValues := mp.messageBloomValues.NewStreamWriter()
 	createBloomValuesWriter := func(_ uint64) bloomValuesStreamWriter {
@@ -298,6 +317,8 @@ func (bsw *blockStreamWriter) MustInitForInmemoryPart(mp *inmemoryPart) {
 // if nocache is true, then the written data doesn't go to OS page cache.
 func (bsw *blockStreamWriter) MustInitForFilePart(path string, nocache bool) {
 	bsw.reset()
+
+	bsw.partPath = path
 
 	fs.MustMkdirFailIfExist(path)
 
@@ -442,6 +463,7 @@ func (bsw *blockStreamWriter) mustWriteBlockInternal(sid *streamID, b *block, bd
 
 	// Marshal bh
 	bsw.indexBlockData = bh.marshal(bsw.indexBlockData)
+	bsw.lastBlockID = bh.columnsHeaderOffset
 	putBlockHeader(bh)
 	if len(bsw.indexBlockData) > maxUncompressedIndexBlockSize {
 		bsw.mustFlushIndexBlock(bsw.indexBlockData)
@@ -488,6 +510,18 @@ func (bsw *blockStreamWriter) Finalize(ph *partHeader) {
 	ph.CompressedSizeBytes = bsw.streamWriters.totalBytesWritten()
 
 	bsw.streamWriters.MustClose()
+
+	// Persist accumulated delete markers if any
+	if len(bsw.dm.blockIDs) > 0 {
+		if bsw.mp != nil {
+			bsw.mp.deleteMarker = bsw.dm
+		} else if bsw.partPath != "" {
+			datBuf := bsw.dm.Marshal(nil)
+			datPath := filepath.Join(bsw.partPath, rowMarkerDatFilename)
+			fs.MustWriteSync(datPath, datBuf)
+		}
+	}
+
 	bsw.reset()
 }
 
@@ -511,3 +545,8 @@ func putBlockStreamWriter(bsw *blockStreamWriter) {
 }
 
 var blockStreamWriterPool sync.Pool
+
+// LastBlockID returns the blockID (columnsHeaderOffset) of the last written block.
+func (bsw *blockStreamWriter) LastBlockID() uint64 {
+	return bsw.lastBlockID
+}

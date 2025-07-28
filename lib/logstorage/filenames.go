@@ -15,6 +15,12 @@ const (
 	messageValuesFilename      = "message_values.bin"
 	messageBloomFilename       = "message_bloom.bin"
 
+	// Filename for per-row marker data (e.g. delete markers).
+	rowMarkerDatFilename = "deleted_rows.bin"
+
+	// Filename for async tasks storage at partition level.
+	asyncTasksFilename = "async_tasks.json"
+
 	metadataFilename = "metadata.json"
 	partsFilename    = "parts.json"
 

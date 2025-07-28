@@ -2,6 +2,7 @@ package vlstorage
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -14,6 +15,8 @@ import (
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/logger"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/promauth"
 	"github.com/VictoriaMetrics/metrics"
+
+	"html/template"
 
 	"github.com/VictoriaMetrics/VictoriaLogs/app/vlstorage/netinsert"
 	"github.com/VictoriaMetrics/VictoriaLogs/app/vlstorage/netselect"
@@ -212,6 +215,10 @@ func RequestHandler(w http.ResponseWriter, r *http.Request) bool {
 		return processForceMerge(w, r)
 	case "/internal/force_flush":
 		return processForceFlush(w, r)
+	case "/internal/async_tasks":
+		return processAsyncTasks(w, r)
+	case "/internal/delete":
+		return processDeleteRequest(w, r)
 	}
 	return false
 }
@@ -251,6 +258,139 @@ func processForceFlush(w http.ResponseWriter, r *http.Request) bool {
 
 	logger.Infof("flushing storage to make pending data available for reading")
 	localStorage.DebugFlush()
+	return true
+}
+
+func processDeleteRequest(w http.ResponseWriter, r *http.Request) bool {
+	ctx := r.Context()
+
+	// Extract tenantID
+	tenantID, err := logstorage.GetTenantIDFromRequest(r)
+	if err != nil {
+		httpserver.Errorf(w, r, "cannot obtain tenanID: %s", err)
+		return true
+	}
+	tenantIDs := []logstorage.TenantID{tenantID}
+
+	// Parse query
+	qStr := r.FormValue("query")
+	q, err := logstorage.ParseQueryAtTimestamp(qStr, time.Now().UnixNano()-1)
+	if err != nil {
+		httpserver.Errorf(w, r, "cannot parse query [%s]: %s", qStr, err)
+		return true
+	}
+
+	if err := DeleteRows(ctx, tenantIDs, q); err != nil {
+		httpserver.Errorf(w, r, "%s", err)
+		return true
+	}
+
+	w.Header().Set("Content-Type", "text/plain")
+	_, _ = w.Write([]byte("ok"))
+	return true
+}
+
+var asyncTasksTmpl = template.Must(template.New("asyncTasks").Parse(`
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta http-equiv="refresh" content="5">
+	<meta charset="utf-8">
+	<title>VictoriaLogs — Async tasks</title>
+	<style>
+		:root {
+			--bg: #f9f9f9;
+			--border: #d0d0d0;
+			--header-bg: #fafafa;
+			--row-alt-bg: #ffffff;
+			--row-hover: #eef2ff;
+			--font: system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;
+			--font-size: 14px;
+		}
+		html,body { margin: 0; padding: 0; font-family: var(--font); background: var(--bg); font-size: var(--font-size); }
+		main { padding: 16px; }
+		h2 { margin: 0 0 12px; font-weight: 600; }
+		table { width: 100%; border-collapse: collapse; background: white; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
+		th,td { padding: 6px 10px; border: 1px solid var(--border); text-align: left; vertical-align: top; }
+		thead th { background: var(--header-bg); position: sticky; top: 0; z-index: 1; }
+		tbody tr:nth-child(odd) { background: var(--row-alt-bg); }
+		tbody tr:hover { background: var(--row-hover); }
+		.status { font-weight: 600; padding: 2px 6px; border-radius: 4px; display:inline-block; text-transform: capitalize; }
+		.status.pending { background:#fff4cc; color:#856404; }
+		.status.success { background:#d3f9d8; color:#14532d; }
+		.status.error { background:#f8d7da; color:#842029; }
+		pre { margin: 0; white-space: pre-wrap; word-break: break-word; }
+	</style>
+</head>
+<body>
+	<main>
+	<h2>Async tasks</h2>
+
+	{{- if .Tasks }}
+	<table>
+		<thead>
+			<tr>
+				<th style="width:70px;">Seq</th>
+				<th style="width:140px;">Type</th>
+				<th style="width:120px;">Status</th>
+				<th style="width:160px;">Tenant</th>
+				<th>Payload</th>
+			</tr>
+		</thead>
+		<tbody>
+			{{- range .Tasks }}
+			<tr>
+				<td>{{ .Seq }}</td>
+				<td>{{ .Type }}</td>
+				<td><span class="status {{ .Status }}">{{ .Status }}</span></td>
+				<td>{{ html .Tenant }}</td>
+				<td><pre>{{ html .PayloadJSON }}</pre></td>
+			</tr>
+			{{- end }}
+		</tbody>
+	</table>
+	{{- else }}
+	<p>No async tasks found.</p>
+	{{- end }}
+	</main>
+</body>
+</html>
+`))
+
+func processAsyncTasks(w http.ResponseWriter, _ *http.Request) bool {
+	if localStorage == nil {
+		return false // only in local mode
+	}
+	tasks := localStorage.ListAsyncTasks()
+
+	// build lightweight view-model so template logic stays simple
+	type row struct {
+		Seq         uint64
+		Type        string
+		Status      string
+		Tenant      string
+		PayloadJSON string
+	}
+	vm := struct {
+		Tasks []row
+	}{}
+
+	for _, t := range tasks {
+		payloadJSON, _ := json.Marshal(t.Payload)
+		vm.Tasks = append(vm.Tasks, row{
+			Seq:         t.Seq,
+			Type:        t.Type,
+			Status:      t.Status,
+			Tenant:      t.Tenant,
+			PayloadJSON: string(payloadJSON),
+		})
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := asyncTasksTmpl.Execute(w, vm); err != nil {
+		logger.Errorf("render async tasks: %s", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+	}
 	return true
 }
 
@@ -349,6 +489,19 @@ func GetStreamIDs(ctx context.Context, tenantIDs []logstorage.TenantID, q *logst
 		return localStorage.GetStreamIDs(ctx, tenantIDs, q, limit)
 	}
 	return netstorageSelect.GetStreamIDs(ctx, tenantIDs, q, limit)
+}
+
+// DeleteRows marks rows matching q with the Deleted marker (full or partial) and flushes markers to disk immediately.
+func DeleteRows(ctx context.Context, tenantIDs []logstorage.TenantID, q *logstorage.Query) error {
+	err := logstorage.ValidateDeleteQuery(q)
+	if err != nil {
+		return fmt.Errorf("validate query: %w", err)
+	}
+
+	if localStorage != nil {
+		return localStorage.DeleteRows(ctx, tenantIDs, q)
+	}
+	return netstorageSelect.DeleteRows(ctx, tenantIDs, q)
 }
 
 func writeStorageMetrics(w io.Writer, strg *logstorage.Storage) {

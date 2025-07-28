@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/logger"
 )
@@ -14,13 +15,26 @@ import (
 // Finalize() is guaranteed to be called on bsrs and bsw before returning from the func.
 func mustMergeBlockStreams(ph *partHeader, bsw *blockStreamWriter, bsrs []*blockStreamReader, stopCh <-chan struct{}) {
 	bsm := getBlockStreamMerger()
+	bsm.ID = time.Now().UnixNano()
 	bsm.mustInit(bsw, bsrs)
 	for len(bsm.readersHeap) > 0 {
 		if needStop(stopCh) {
 			break
 		}
 		bsr := bsm.readersHeap[0]
-		bsm.mustWriteBlock(&bsr.blockData, bsw)
+
+		// Use columnsHeaderOffset (uint64) as a stable identifier for the block.
+		var currBlockID uint64
+		if len(bsr.blockHeaders) > 0 {
+			idx := bsr.nextBlockIdx - 1
+			if idx >= 0 && idx < len(bsr.blockHeaders) {
+				currBlockID = bsr.blockHeaders[idx].columnsHeaderOffset
+			}
+		}
+		if !bsm.processDeleteMarker(bsr, currBlockID) {
+			bsm.mustWriteBlock(&bsr.blockData, bsw)
+		}
+
 		if bsr.NextBlock() {
 			heap.Fix(&bsm.readersHeap, 0)
 		} else {
@@ -36,6 +50,8 @@ func mustMergeBlockStreams(ph *partHeader, bsw *blockStreamWriter, bsrs []*block
 
 // blockStreamMerger merges block streams
 type blockStreamMerger struct {
+	ID int64
+
 	// bsw is the block stream writer to write the merged blocks.
 	bsw *blockStreamWriter
 
@@ -90,6 +106,7 @@ func (bsm *blockStreamMerger) reset() {
 
 	bsm.streamID.reset()
 	bsm.resetRows()
+	bsm.uniqueFields = 0
 }
 
 func (bsm *blockStreamMerger) resetRows() {
@@ -313,4 +330,50 @@ func (h *blockStreamReadersHeap) Pop() any {
 	x[len(x)-1] = nil
 	*h = x[:len(x)-1]
 	return bsr
+}
+
+// processDeleteMarker applies delete-markers to the current block in bsr.
+// It returns true if the caller must `continue` the outer merge loop.
+// Depending on the marker entry the function can:
+//  1. Skip the block entirely (full delete);
+//  2. Partially prune rows and re-queue the pruned block so that heap order is preserved.
+//
+// In both cases the original reader is advanced to the next block or popped when exhausted.
+func (bsm *blockStreamMerger) processDeleteMarker(bsr *blockStreamReader, blockID uint64) bool {
+	dm := bsr.deleteMarker
+	if len(dm.blockIDs) == 0 {
+		return false
+	}
+
+	bm, ok := dm.GetMarkedRows(blockID)
+	if !ok {
+		return false
+	}
+
+	rowsTotal := int(bsr.blockData.rowsCount)
+	if rowsTotal == 0 {
+		logger.Panicf("BUG: rowsTotal == 0")
+	}
+
+	// FULL DELETE ─ drop block completely.
+	if bm.IsOnes(uint64(rowsTotal)) {
+		return true
+	}
+
+	// PARTIAL DELETE ─ keep compressed block, attach new marker because we must
+	// preserve ordering by minTimestamp and avoid heavy rewriting.
+	// Since we are about to write a block that originally followed everything
+	// already flushed, we must make sure nothing is buffered.
+	bsm.mustFlushRows()
+
+	// Write the original block bytes unchanged.
+	bsm.bsw.MustWriteBlockData(&bsr.blockData)
+
+	// Obtain the new blockID assigned by the writer.
+	newID := bsm.bsw.LastBlockID()
+
+	// Accumulate delete-marker directly in writer
+	bsm.bsw.dm.AddBlock(newID, bm)
+
+	return true
 }

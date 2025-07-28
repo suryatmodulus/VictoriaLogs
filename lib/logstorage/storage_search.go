@@ -39,6 +39,10 @@ type genericSearchOptions struct {
 
 	// fieldsFilter is the filter of fields to return in the result
 	fieldsFilter *prefixfilter.Filter
+
+	// pws maps partition to the list of parts to search.
+	// If pws is empty, search all eligible parts on disk.
+	pws map[*partition][]*partWrapper
 }
 
 type searchOptions struct {
@@ -61,6 +65,10 @@ type searchOptions struct {
 
 	// fieldsFilter is the filter of fields to return in the result
 	fieldsFilter *prefixfilter.Filter
+
+	// pws is the list of parts to search.
+	// If pws is empty, search all eligible parts on disk.
+	pws []*partWrapper
 }
 
 // WriteDataBlockFunc must process the db.
@@ -75,6 +83,7 @@ func (f WriteDataBlockFunc) newBlockResultWriter() writeBlockResultFunc {
 		if br.rowsLen == 0 {
 			return
 		}
+
 		db := dbs.Get(workerID)
 		db.initFromBlockResult(br)
 		f(workerID, db)
@@ -98,7 +107,9 @@ func (f writeBlockResultFunc) newDataBlockWriter() WriteDataBlockFunc {
 	}
 }
 
-// RunQuery runs the given q and calls writeBlock for results.
+// RunQuery executes q across all eligible parts (the common case).
+// Internally it is just a convenience wrapper that forwards to runQuery with
+// `pws=nil`, so callers don't need to spell that out everywhere.
 func (s *Storage) RunQuery(ctx context.Context, tenantIDs []TenantID, q *Query, writeBlock WriteDataBlockFunc) error {
 	writeBlockResult := writeBlock.newBlockResultWriter()
 	return s.runQuery(ctx, tenantIDs, q, writeBlockResult)
@@ -107,7 +118,14 @@ func (s *Storage) RunQuery(ctx context.Context, tenantIDs []TenantID, q *Query, 
 // runQueryFunc must run the given q and pass query results to writeBlock
 type runQueryFunc func(ctx context.Context, tenantIDs []TenantID, q *Query, writeBlock writeBlockResultFunc) error
 
+// runQuery executes q against all eligible parts (normal search path).
 func (s *Storage) runQuery(ctx context.Context, tenantIDs []TenantID, q *Query, writeBlock writeBlockResultFunc) error {
+	return s.runQueryWithParts(ctx, tenantIDs, q, nil, writeBlock)
+}
+
+// runQueryWithParts executes q against the specified parts map.
+// If pws is nil, searches all eligible parts (same as runQuery).
+func (s *Storage) runQueryWithParts(ctx context.Context, tenantIDs []TenantID, q *Query, pws map[*partition][]*partWrapper, writeBlock writeBlockResultFunc) error {
 	qNew, err := initSubqueries(ctx, tenantIDs, q, s.runQuery, true)
 	if err != nil {
 		return err
@@ -129,6 +147,7 @@ func (s *Storage) runQuery(ctx context.Context, tenantIDs []TenantID, q *Query, 
 		maxTimestamp: maxTimestamp,
 		filter:       q.f,
 		fieldsFilter: fieldsFilter,
+		pws:          pws,
 	}
 
 	workersCount := q.GetConcurrency()
@@ -570,7 +589,11 @@ func initStreamContextPipes(q *Query, runQuery runQueryFunc) (*Query, error) {
 		fieldsFilter := getNeededColumns(pipes)
 
 		pipesNew := append([]pipe{}, pipes...)
-		pipesNew[0] = pc.withRunQuery(runQuery, fieldsFilter)
+		// Create a simple wrapper that ignores the pws argument
+		simpleRunQuery := func(ctx context.Context, tenantIDs []TenantID, q *Query, writeBlock writeBlockResultFunc) error {
+			return runQuery(ctx, tenantIDs, q, writeBlock)
+		}
+		pipesNew[0] = pc.withRunQuery(simpleRunQuery, fieldsFilter)
 		qNew := q.cloneShallow()
 		qNew.pipes = pipesNew
 		return qNew, nil
@@ -1033,38 +1056,13 @@ func (db *DataBlock) initFromBlockResult(br *blockResult) {
 //
 // It calls writeBlock for each matching block.
 func (s *Storage) search(workersCount int, so *genericSearchOptions, stopCh <-chan struct{}, writeBlock writeBlockResultFunc) {
-	// Spin up workers
-	var wgWorkers sync.WaitGroup
-	workCh := make(chan *blockSearchWorkBatch, workersCount)
-	wgWorkers.Add(workersCount)
-	for i := 0; i < workersCount; i++ {
-		go func(workerID uint) {
-			bs := getBlockSearch()
-			bm := getBitmap(0)
-			for bswb := range workCh {
-				bsws := bswb.bsws
-				for i := range bsws {
-					bsw := &bsws[i]
-					if needStop(stopCh) {
-						// The search has been canceled. Just skip all the scheduled work in order to save CPU time.
-						bsw.reset()
-						continue
-					}
-
-					bs.search(bsw, bm)
-					if bs.br.rowsLen > 0 {
-						writeBlock(workerID, &bs.br)
-					}
-					bsw.reset()
-				}
-				bswb.bsws = bswb.bsws[:0]
-				putBlockSearchWorkBatch(bswb)
-			}
-			putBlockSearch(bs)
-			putBitmap(bm)
-			wgWorkers.Done()
-		}(uint(i))
+	if len(so.pws) > 0 {
+		s.searchOnPartitions(workersCount, so, stopCh, writeBlock)
+		return
 	}
+
+	// Setup workers and work channel
+	workCh, wgWorkers := setupSearchWorkers(workersCount, stopCh, writeBlock)
 
 	// Select partitions according to the selected time range
 	s.partitionsLock.Lock()
@@ -1105,9 +1103,8 @@ func (s *Storage) search(workersCount int, so *genericSearchOptions, stopCh <-ch
 	}
 	wgSearchers.Wait()
 
-	// Wait until workers finish their work
-	close(workCh)
-	wgWorkers.Wait()
+	// Wait for workers to complete and finalize
+	finishSearchWorkers(workCh, wgWorkers)
 
 	// Finalize partition search
 	for _, psf := range psfs {
@@ -1120,6 +1117,71 @@ func (s *Storage) search(workersCount int, so *genericSearchOptions, stopCh <-ch
 	}
 }
 
+// searchOnParts is similar to storage.search but only processes the specified allowed parts.
+func (s *Storage) searchOnPartitions(workersCount int, so *genericSearchOptions, stopCh <-chan struct{}, writeBlock writeBlockResultFunc) {
+	// Setup workers and work channel using shared function
+	workCh, wgWorkers := setupSearchWorkers(workersCount, stopCh, writeBlock)
+
+	var wgSearchers sync.WaitGroup
+	for pt := range so.pws {
+		partitionSearchConcurrencyLimitCh <- struct{}{}
+		wgSearchers.Add(1)
+		go func(partition *partition) {
+			sf, f := getCommonStreamFilter(so.filter)
+			partition.search(sf, f, so, workCh, stopCh)
+
+			wgSearchers.Done()
+			<-partitionSearchConcurrencyLimitCh
+		}(pt)
+	}
+	wgSearchers.Wait()
+
+	// Wait for workers to complete and finalize using shared function
+	finishSearchWorkers(workCh, wgWorkers)
+}
+
+// setupSearchWorkers creates worker goroutines and returns the work channel and wait group
+func setupSearchWorkers(workersCount int, stopCh <-chan struct{}, writeBlock writeBlockResultFunc) (chan *blockSearchWorkBatch, *sync.WaitGroup) {
+	var wgWorkers sync.WaitGroup
+	workCh := make(chan *blockSearchWorkBatch, workersCount)
+	wgWorkers.Add(workersCount)
+	for i := 0; i < workersCount; i++ {
+		go func(workerID uint) {
+			bs := getBlockSearch()
+			bm := getBitmap(0)
+			for bswb := range workCh {
+				bsws := bswb.bsws
+				for i := range bsws {
+					bsw := &bsws[i]
+					if needStop(stopCh) {
+						// The search has been canceled. Just skip all the scheduled work in order to save CPU time.
+						bsw.reset()
+						continue
+					}
+
+					bs.search(bsw, bm)
+					if bs.br.rowsLen > 0 {
+						writeBlock(workerID, &bs.br)
+					}
+					bsw.reset()
+				}
+				bswb.bsws = bswb.bsws[:0]
+				putBlockSearchWorkBatch(bswb)
+			}
+			putBlockSearch(bs)
+			putBitmap(bm)
+			wgWorkers.Done()
+		}(uint(i))
+	}
+	return workCh, &wgWorkers
+}
+
+// finishSearchWorkers closes the work channel and waits for all workers to complete
+func finishSearchWorkers(workCh chan *blockSearchWorkBatch, wgWorkers *sync.WaitGroup) {
+	close(workCh)
+	wgWorkers.Wait()
+}
+
 // partitionSearchConcurrencyLimitCh limits the number of concurrent searches in partition.
 //
 // This is needed for limiting memory usage under high load.
@@ -1127,6 +1189,8 @@ var partitionSearchConcurrencyLimitCh = make(chan struct{}, cgroup.AvailableCPUs
 
 type partitionSearchFinalizer func()
 
+// search searches all parts passed in.
+// If pws is empty, it tries to search all eligible parts in the partition.
 func (pt *partition) search(sf *StreamFilter, f filter, so *genericSearchOptions, workCh chan<- *blockSearchWorkBatch, stopCh <-chan struct{}) partitionSearchFinalizer {
 	if needStop(stopCh) {
 		// Do not spend CPU time on search, since it is already stopped.
@@ -1148,6 +1212,7 @@ func (pt *partition) search(sf *StreamFilter, f filter, so *genericSearchOptions
 	if hasStreamFilters(f) {
 		f = initStreamFilters(so.tenantIDs, pt.idb, f)
 	}
+
 	soInternal := &searchOptions{
 		tenantIDs:    tenantIDs,
 		streamIDs:    streamIDs,
@@ -1155,7 +1220,9 @@ func (pt *partition) search(sf *StreamFilter, f filter, so *genericSearchOptions
 		maxTimestamp: so.maxTimestamp,
 		filter:       f,
 		fieldsFilter: so.fieldsFilter,
+		pws:          so.pws[pt],
 	}
+
 	return pt.ddb.search(soInternal, workCh, stopCh)
 }
 
@@ -1221,15 +1288,28 @@ func initStreamFilters(tenantIDs []TenantID, idb *indexdb, f filter) filter {
 func (ddb *datadb) search(so *searchOptions, workCh chan<- *blockSearchWorkBatch, stopCh <-chan struct{}) partitionSearchFinalizer {
 	// Select parts with data for the given time range
 	ddb.partsLock.Lock()
-	pws := appendPartsInTimeRange(nil, ddb.bigParts, so.minTimestamp, so.maxTimestamp)
-	pws = appendPartsInTimeRange(pws, ddb.smallParts, so.minTimestamp, so.maxTimestamp)
-	pws = appendPartsInTimeRange(pws, ddb.inmemoryParts, so.minTimestamp, so.maxTimestamp)
+	var pws []*partWrapper
+
+	if len(so.pws) == 0 {
+		pws = appendPartsInTimeRange(nil, ddb.bigParts, so.minTimestamp, so.maxTimestamp)
+		pws = appendPartsInTimeRange(pws, ddb.smallParts, so.minTimestamp, so.maxTimestamp)
+		pws = appendPartsInTimeRange(pws, ddb.inmemoryParts, so.minTimestamp, so.maxTimestamp)
+	} else {
+		for i := range so.pws {
+			p := so.pws[i].p
+			if p.ph.MinTimestamp > so.maxTimestamp || p.ph.MaxTimestamp < so.minTimestamp {
+				continue
+			}
+			pws = append(pws, so.pws[i])
+		}
+	}
 
 	// Increase references to the searched parts, so they aren't deleted during search.
 	// References to the searched parts must be decremented by calling the returned partitionSearchFinalizer.
 	for _, pw := range pws {
 		pw.incRef()
 	}
+
 	ddb.partsLock.Unlock()
 
 	// Apply search to matching parts

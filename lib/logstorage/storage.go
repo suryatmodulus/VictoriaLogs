@@ -1,6 +1,8 @@
 package logstorage
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -11,6 +13,7 @@ import (
 	"time"
 
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/cgroup"
+	"github.com/VictoriaMetrics/VictoriaMetrics/lib/fasttime"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/fs"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/logger"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/timeutil"
@@ -148,6 +151,66 @@ type Storage struct {
 	//
 	// minRetentionDay must be accessed under the partitionsLock.
 	minRetentionDay int64
+
+	// asyncTaskState is used to stop the async task worker.
+	asyncTaskState asyncTaskState
+	asyncTaskSeq   atomic.Uint64
+}
+
+type asyncTaskState struct {
+	waiter atomic.Int32
+	mu     sync.Mutex
+	ch     chan struct{}
+}
+
+// init prepares the pause channel; must be called once at storage startup.
+func (ats *asyncTaskState) init() {
+	ats.mu.Lock()
+	if ats.ch == nil {
+		ats.ch = make(chan struct{})
+	}
+	ats.mu.Unlock()
+}
+
+// addWaiter increments the waiter counter and returns the channel
+// that will be closed when the async-task worker acknowledges the pause.
+func (ats *asyncTaskState) addWaiter() <-chan struct{} {
+	ats.mu.Lock()
+	ch := ats.ch
+	ats.waiter.Add(1)
+	ats.mu.Unlock()
+	return ch
+}
+
+// doneWaiter decrements the waiter counter, signalling that the caller has
+// finished the critical section.
+func (ats *asyncTaskState) doneWaiter() {
+	if n := ats.waiter.Add(-1); n == 0 {
+		// All waiters are done – prepare a fresh channel for the next pause.
+		ats.mu.Lock()
+		if ats.ch == nil {
+			ats.ch = make(chan struct{})
+		}
+		ats.mu.Unlock()
+	}
+}
+
+// canProcess returns true if the async-task worker may proceed with work. If
+// there are active waiters, it closes the channel to acknowledge the pause and
+// returns false.
+func (ats *asyncTaskState) canProcess() bool {
+	if ats.waiter.Load() == 0 {
+		return true
+	}
+
+	ats.mu.Lock()
+	if ats.ch != nil {
+		close(ats.ch)
+		ats.ch = nil
+	}
+	ats.mu.Unlock()
+
+	return false
 }
 
 type partitionWrapper struct {
@@ -268,6 +331,9 @@ func MustOpenStorage(path string, cfg *StorageConfig) *Storage {
 		filterStreamCache: filterStreamCache,
 	}
 
+	// Initialize the async-task pause mechanism.
+	s.asyncTaskState.init()
+
 	partitionsPath := filepath.Join(path, partitionsDirname)
 	fs.MustMkdirIfNotExist(partitionsPath)
 	des := fs.MustReadDir(partitionsPath)
@@ -334,6 +400,10 @@ func MustOpenStorage(path string, cfg *StorageConfig) *Storage {
 	s.partitions = ptws
 	s.runRetentionWatcher()
 	s.runMaxDiskSpaceUsageWatcher()
+
+	// Start background async-task reconciler
+	s.startAsyncTaskWorker()
+
 	return s
 }
 
@@ -536,6 +606,14 @@ func (s *Storage) MustForceMerge(partitionNamePrefix string) {
 	}
 	s.partitionsLock.Unlock()
 
+	// Pause the async-task worker.
+	ch := s.asyncTaskState.addWaiter()
+	defer s.asyncTaskState.doneWaiter()
+
+	// Wait until the worker acknowledges pause by closing the channel.
+	<-ch
+
+	// shutdown must wait for force merge.
 	s.wg.Add(1)
 	defer s.wg.Done()
 
@@ -599,6 +677,7 @@ func (s *Storage) MustAddRows(lr *LogRows) {
 			s.rowsDroppedTooBigTimestamp.Add(1)
 			continue
 		}
+
 		lrPart := m[day]
 		if lrPart == nil {
 			lrPart = GetLogRows(nil, nil, nil, nil, "")
@@ -725,4 +804,158 @@ func (s *Storage) DebugFlush() {
 
 func durationToDays(d time.Duration) int64 {
 	return int64(d / (time.Hour * 24))
+}
+
+func ValidateDeleteQuery(q *Query) error {
+	if q.pipes != nil {
+		return fmt.Errorf("query must not contain pipes")
+	}
+
+	if q.f == nil {
+		return fmt.Errorf("query must contain a filter")
+	}
+
+	minTS, maxTS := q.GetFilterTimeRange()
+	if maxTS > int64(fasttime.UnixTimestamp()*1e9) {
+		q.AddTimeFilter(minTS, time.Now().UnixNano())
+	}
+
+	return nil
+}
+
+func (s *Storage) DeleteRows(ctx context.Context, tenantIDs []TenantID, q *Query) error {
+	minTS, maxTS := q.GetFilterTimeRange()
+	minDay := minTS / nsecsPerDay
+	maxDay := maxTS / nsecsPerDay
+	seq := taskSeq.Add(1)
+
+	s.partitionsLock.Lock()
+	var ptws []*partitionWrapper
+	for _, ptw := range s.partitions {
+		if ptw.day < minDay || ptw.day > maxDay {
+			continue // outside time window
+		}
+		ptw.incRef()
+		ptws = append(ptws, ptw)
+	}
+	s.partitionsLock.Unlock()
+
+	for _, ptw := range ptws {
+		ptw.pt.ats.addDeleteTaskSync(tenantIDs, q, seq)
+	}
+
+	return nil
+}
+
+// markDeleteRowsOnParts behaves like MarkRows but only processes data from the supplied parts.
+// allowed map must contain *part keys that can be modified.
+func (s *Storage) markDeleteRowsOnParts(ctx context.Context, tenantIDs []TenantID, qStr string, seq uint64, allowed map[*partition][]*partWrapper) error {
+	q, err := ParseQuery(qStr)
+	if err != nil {
+		return fmt.Errorf("parse query: %w", err)
+	}
+	if len(q.pipes) > 0 {
+		return fmt.Errorf("query must not contain pipes")
+	}
+
+	minTs, maxTs := q.GetFilterTimeRange()
+	for pt, pws := range allowed {
+		kept := pws[:0] // reuse underlying array
+		for _, pw := range pws {
+			if pw.p.ph.MinTimestamp > maxTs || pw.p.ph.MaxTimestamp < minTs {
+				continue // part is fully outside [minTs, maxTs]
+			}
+			kept = append(kept, pw)
+		}
+		if len(kept) == 0 {
+			delete(allowed, pt) // drop partition entirely if nothing left
+		} else {
+			allowed[pt] = kept
+		}
+	}
+
+	// Build mapping of parts to wrappers and log allowed parts
+	pwMap := make(map[*part]*partWrapper)
+	for _, ptw := range allowed {
+		for _, pw := range ptw {
+			pwMap[pw.p] = pw
+		}
+	}
+
+	type partMarkerData struct {
+		part      *partWrapper
+		delMarker *deleteMarker
+	}
+	partMarkers := make(map[string]*partMarkerData)
+
+	var partMarkersLock sync.Mutex
+	writeBlockResult := func(_ uint, br *blockResult) {
+		if br == nil || br.rowsLen == 0 {
+			return
+		}
+		bm := br.bm
+		if bm == nil || bm.isZero() {
+			return
+		}
+		bs := br.bs
+		if bs == nil {
+			return
+		}
+		p := bs.bsw.p
+		if p == nil {
+			return
+		}
+
+		rowsCount := int(bs.bsw.bh.rowsCount)
+		ones := bm.onesCount()
+
+		blockID := bs.bsw.bh.columnsHeaderOffset
+		var rle boolRLE
+		if ones == rowsCount {
+			rle = boolRLE(nil).SetAllOnes(rowsCount)
+		} else {
+			rle = boolRLE(bm.MarshalBoolRLE(nil))
+		}
+
+		if !rle.IsStateful() {
+			return // need at least 2 items in RLE bitmap
+		}
+
+		if bs.bsw.dm != nil {
+			existedRLE, ok := bs.bsw.dm.GetMarkedRows(blockID)
+			if ok && rle.IsSubsetOf(existedRLE) {
+				return // already marked
+			}
+		}
+
+		partPath := p.path
+		partMarkersLock.Lock()
+		m, ok := partMarkers[partPath]
+		if !ok {
+			m = &partMarkerData{
+				part:      pwMap[p],
+				delMarker: &deleteMarker{},
+			}
+			partMarkers[partPath] = m
+		}
+		m.delMarker.AddBlock(blockID, rle)
+		partMarkersLock.Unlock()
+	}
+
+	// Use specialized search that only processes allowed parts
+	if err := s.runQueryWithParts(ctx, tenantIDs, q, allowed, writeBlockResult); err != nil {
+		return fmt.Errorf("find rows: %w", err)
+	}
+
+	for _, pm := range partMarkers {
+		flushDeleteMarker(pm.part, pm.delMarker, seq)
+	}
+
+	// DEBUG:
+	partCount := 0
+	for i := range allowed {
+		partCount += len(allowed[i])
+	}
+	logger.Infof("DEBUG: affected (originalParts=%d, parts=%d, seq=%d)", partCount, len(partMarkers), seq)
+	return nil
 }
