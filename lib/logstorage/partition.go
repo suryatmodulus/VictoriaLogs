@@ -1,6 +1,8 @@
 package logstorage
 
 import (
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"sort"
 
@@ -32,6 +34,11 @@ type partition struct {
 
 	// ddb is the datadb used for the given partition
 	ddb *datadb
+
+	// ats holds outstanding background tasks (delete, ttl, etc.) for the partition.
+	// The length of this slice equals to the latest sequence number of tasks created for the partition.
+	// Access must be protected with asyncTasksLock.
+	ats *asyncTasks
 }
 
 // mustCreatePartition creates a partition at the given path.
@@ -93,8 +100,10 @@ func mustOpenPartition(s *Storage, path string) *partition {
 		mustCreateDatadb(datadbPath)
 	}
 
-	pt.ddb = mustOpenDatadb(pt, datadbPath, s.flushInterval)
+	// async tasks must be loaded before datadb
+	pt.mustLoadAsyncTasks()
 
+	pt.ddb = mustOpenDatadb(pt, datadbPath, s.flushInterval)
 	return pt
 }
 
@@ -211,4 +220,39 @@ func (pt *partition) updateStats(ps *PartitionStats) {
 // mustForceMerge runs forced merge for all the parts in pt.
 func (pt *partition) mustForceMerge() {
 	pt.ddb.mustForceMergeAllParts()
+}
+
+// mustSaveAsyncTasks persists the current async tasks to disk.
+func (pt *partition) mustSaveAsyncTasks() {
+	pt.ats.mu.Lock()
+	snapshot := append([]asyncTask(nil), pt.ats.ts...)
+	pt.ats.mu.Unlock()
+
+	data, err := json.Marshal(snapshot)
+	if err != nil {
+		logger.Panicf("FATAL: cannot marshal async tasks: %s", err)
+	}
+
+	tasksPath := filepath.Join(pt.path, asyncTasksFilename)
+	fs.MustWriteAtomic(tasksPath, data, true)
+}
+
+// mustLoadAsyncTasks loads async tasks from disk during partition startup
+func (pt *partition) mustLoadAsyncTasks() {
+	tasksPath := filepath.Join(pt.path, asyncTasksFilename)
+	if !fs.IsPathExist(tasksPath) {
+		pt.ats = newAsyncTasks(pt, nil)
+		return
+	}
+
+	data, err := os.ReadFile(tasksPath)
+	if err != nil {
+		logger.Panicf("FATAL: cannot read async tasks from %q: %s", tasksPath, err)
+	}
+
+	tasks, err := unmarshalAsyncTasks(data)
+	if err != nil {
+		logger.Panicf("FATAL: cannot unmarshal async tasks from %q: %s", tasksPath, err)
+	}
+	pt.ats = newAsyncTasks(pt, tasks)
 }
