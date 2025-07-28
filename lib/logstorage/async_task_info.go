@@ -1,6 +1,10 @@
 package logstorage
 
-import "strings"
+import (
+	"strings"
+	"sync"
+	"time"
+)
 
 // AsyncTaskInfo represents brief information about a background async task.
 // It is intended to be exposed via monitoring endpoints / UI pages.
@@ -16,9 +20,31 @@ type AsyncTaskInfo struct {
 	Error       string `json:"error,omitempty"`
 }
 
+type AsyncTaskInfoWithSource struct {
+	AsyncTaskInfo `json:",inline"`
+	Storage       string `json:"storage"`
+}
+
+// simple cache valid for 5 seconds for the sole Storage instance
+var asyncTasksCache struct {
+	mu   sync.Mutex
+	ts   time.Time
+	data []AsyncTaskInfo
+}
+
 // ListAsyncTasks gathers information about all async tasks known to this
 // Storage instance. The returned slice isn't sorted.
 func (s *Storage) ListAsyncTasks() []AsyncTaskInfo {
+	// Try cached value first (valid for 5 seconds)
+	asyncTasksCache.mu.Lock()
+	const duration = 5 * time.Second
+	if time.Since(asyncTasksCache.ts) < duration && asyncTasksCache.data != nil {
+		data := asyncTasksCache.data
+		asyncTasksCache.mu.Unlock()
+		return data
+	}
+	asyncTasksCache.mu.Unlock()
+
 	var out []AsyncTaskInfo
 
 	s.partitionsLock.Lock()
@@ -70,6 +96,12 @@ func (s *Storage) ListAsyncTasks() []AsyncTaskInfo {
 			out = append(out, info)
 		}
 	}
+
+	// Store in cache
+	asyncTasksCache.mu.Lock()
+	asyncTasksCache.ts = time.Now()
+	asyncTasksCache.data = out
+	asyncTasksCache.mu.Unlock()
 
 	return out
 }

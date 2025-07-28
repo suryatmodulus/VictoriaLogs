@@ -64,6 +64,10 @@ const (
 	// DeleteProtocolVersion is the version of the protocol used for /internal/delete HTTP endpoint.
 	// It must be updated every time the protocol changes.
 	DeleteProtocolVersion = "v1"
+
+	// AsyncTasksProtocolVersion is the version of the protocol used for /internal/async_tasks endpoint when querying JSON format.
+	// Bump this when behavioural changes are introduced.
+	AsyncTasksProtocolVersion = "v1"
 )
 
 // Storage is a network storage for querying remote storage nodes in the cluster.

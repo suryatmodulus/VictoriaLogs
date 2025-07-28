@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/VictoriaMetrics/VictoriaLogs/lib/prefixfilter"
+	"github.com/VictoriaMetrics/VictoriaMetrics/lib/fasttime"
 )
 
 func TestMatchingAddTimeFilter_Parsing(t *testing.T) {
@@ -298,6 +299,30 @@ func TestParseQuery_OptimizeStreamFilters(t *testing.T) {
 	f(`{foo="bar" or baz="x"} {a="b"}`, `{foo="bar" or baz="x"} {a="b"}`)
 	f(`{x="y"} {foo="bar" or baz="x"} {a="b"}`, `{x="y"} {foo="bar" or baz="x"} {a="b"}`)
 	f(`{foo="bar"} or {baz="x"}`, `{foo="bar"} or {baz="x"}`)
+}
+
+func TestParseQueryAtTimestamp(t *testing.T) {
+	q, err := ParseQuery("*")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	minTS, maxTS := q.GetFilterTimeRange()
+	if now := int64(fasttime.UnixTimestamp() * 1e9); maxTS > now {
+		q.AddTimeFilter(minTS, now)
+	}
+
+	minTS, maxTS = q.GetFilterTimeRange()
+	if now := int64(fasttime.UnixTimestamp() * 1e9); maxTS > now {
+		q.AddTimeFilter(minTS, now)
+	}
+
+	minTS, maxTS = q.GetFilterTimeRange()
+	if now := int64(fasttime.UnixTimestamp() * 1e9); maxTS > now {
+		q.AddTimeFilter(minTS, now)
+	}
+
+	fmt.Println(q.String())
 }
 
 func TestParseDayRange(t *testing.T) {

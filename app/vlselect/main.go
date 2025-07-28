@@ -17,6 +17,8 @@ import (
 
 	"github.com/VictoriaMetrics/VictoriaLogs/app/vlselect/internalselect"
 	"github.com/VictoriaMetrics/VictoriaLogs/app/vlselect/logsql"
+	"github.com/VictoriaMetrics/VictoriaLogs/app/vlstorage"
+	"github.com/VictoriaMetrics/VictoriaLogs/lib/logstorage"
 )
 
 var (
@@ -101,6 +103,11 @@ func RequestHandler(w http.ResponseWriter, r *http.Request) bool {
 func selectHandler(w http.ResponseWriter, r *http.Request, path string) bool {
 	ctx := r.Context()
 
+	if path == "/select/async_tasks" {
+		processAsyncTasksRequest(r.Context(), w, r)
+		return true
+	}
+
 	if path == "/select/vmui" {
 		// VMUI access via incomplete url without `/` in the end. Redirect to complete url.
 		// Use relative redirect, since the hostname and path prefix may be incorrect if VictoriaMetrics
@@ -119,6 +126,11 @@ func selectHandler(w http.ResponseWriter, r *http.Request, path string) bool {
 		}
 		r.URL.Path = strings.TrimPrefix(path, "/select")
 		vmuiFileServer.ServeHTTP(w, r)
+		return true
+	}
+
+	if path == "/select/delete" {
+		processDeleteSelectRequest(ctx, w, r)
 		return true
 	}
 
@@ -207,6 +219,31 @@ func incRequestConcurrency(ctx context.Context, w http.ResponseWriter, r *http.R
 
 func decRequestConcurrency() {
 	<-concurrencyLimitCh
+}
+
+// processDeleteSelectRequest handles "/select/delete" endpoint by proxying to internal delete.
+func processDeleteSelectRequest(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+	// Extract tenant ID and query parameters the same way as internal delete.
+	tenantID, err := logstorage.GetTenantIDFromRequest(r)
+	if err != nil {
+		httpserver.Errorf(w, r, "cannot obtain tenantID: %s", err)
+		return
+	}
+
+	qStr := r.FormValue("query")
+	q, err := logstorage.ParseQuery(qStr)
+	if err != nil {
+		httpserver.Errorf(w, r, "cannot parse query [%s]: %s", qStr, err)
+		return
+	}
+
+	if err := vlstorage.DeleteRows(ctx, []logstorage.TenantID{tenantID}, q); err != nil {
+		httpserver.Errorf(w, r, "%s", err)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/plain")
+	_, _ = w.Write([]byte("ok"))
 }
 
 func processSelectRequest(ctx context.Context, w http.ResponseWriter, r *http.Request, path string) bool {

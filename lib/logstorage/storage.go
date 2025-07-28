@@ -806,6 +806,9 @@ func durationToDays(d time.Duration) int64 {
 	return int64(d / (time.Hour * 24))
 }
 
+// ValidateDeleteQuery ensures the query has a filter (required for deletion) and only allows
+// the `limit` pipe. It automatically adjusts the end time to the current time to prevent
+// accidental deletion of future data.
 func ValidateDeleteQuery(q *Query) error {
 	if len(q.pipes) > 0 {
 		// Only `limit` pipe is allowed for delete queries.
@@ -821,13 +824,20 @@ func ValidateDeleteQuery(q *Query) error {
 	}
 
 	minTS, maxTS := q.GetFilterTimeRange()
-	if maxTS > int64(fasttime.UnixTimestamp()*1e9) {
-		q.AddTimeFilter(minTS, time.Now().UnixNano())
+	now := int64(fasttime.UnixTimestamp())
+
+	// vlselect already adds a timestamp, but with floor(now).
+	// To avoid adding _time twice, use seconds to compare with now().
+	if maxTS/1e9 > now {
+		q.AddTimeFilter(minTS, now*1e9)
 	}
 
+	logger.Infof("DEBUG: query: %s, maxTS: %d, now: %d", q.String(), maxTS/1e9, now)
 	return nil
 }
 
+// DeleteRows schedules deletion of log rows matching the query filter for the specified tenants.
+// The actual deletion is performed by background workers to avoid blocking the caller.
 func (s *Storage) DeleteRows(ctx context.Context, tenantIDs []TenantID, q *Query) error {
 	minTS, maxTS := q.GetFilterTimeRange()
 	minDay := minTS / nsecsPerDay

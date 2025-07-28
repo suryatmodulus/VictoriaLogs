@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/flagutil"
@@ -15,8 +16,6 @@ import (
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/logger"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/promauth"
 	"github.com/VictoriaMetrics/metrics"
-
-	"html/template"
 
 	"github.com/VictoriaMetrics/VictoriaLogs/app/vlstorage/netinsert"
 	"github.com/VictoriaMetrics/VictoriaLogs/app/vlstorage/netselect"
@@ -218,7 +217,7 @@ func RequestHandler(w http.ResponseWriter, r *http.Request) bool {
 	case "/internal/async_tasks":
 		return processAsyncTasks(w, r)
 	case "/internal/delete":
-		return processDeleteRequest(w, r)
+		return processInternalDelete(w, r)
 	}
 	return false
 }
@@ -261,166 +260,63 @@ func processForceFlush(w http.ResponseWriter, r *http.Request) bool {
 	return true
 }
 
-func processDeleteRequest(w http.ResponseWriter, r *http.Request) bool {
-	if localStorage == nil {
-		return true
-	}
-
-	ctx := r.Context()
-
-	// Extract tenantID
-	tenantID, err := logstorage.GetTenantIDFromRequest(r)
-	if err != nil {
-		httpserver.Errorf(w, r, "cannot obtain tenanID: %s", err)
-		return true
-	}
-	tenantIDs := []logstorage.TenantID{tenantID}
-
-	// Parse query
-	qStr := r.FormValue("query")
-	q, err := logstorage.ParseQueryAtTimestamp(qStr, time.Now().UnixNano()-1)
-	if err != nil {
-		httpserver.Errorf(w, r, "cannot parse query [%s]: %s", qStr, err)
-		return true
-	}
-
-	if err := DeleteRows(ctx, tenantIDs, q); err != nil {
-		httpserver.Errorf(w, r, "%s", err)
-		return true
-	}
-
-	w.Header().Set("Content-Type", "text/plain")
-	_, _ = w.Write([]byte("ok"))
-	return true
-}
-
-var asyncTasksTmpl = template.Must(template.New("asyncTasks").Parse(`
-<!DOCTYPE html>
-<html lang="en">
-<head>
-	<meta http-equiv="refresh" content="5">
-	<meta charset="utf-8">
-	<title>VictoriaLogs — Async tasks</title>
-	<style>
-		:root {
-			--bg: #f9f9f9;
-			--border: #d0d0d0;
-			--header-bg: #fafafa;
-			--row-alt-bg: #ffffff;
-			--row-hover: #eef2ff;
-			--font: system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;
-			--font-size: 14px;
-		}
-		html,body { margin: 0; padding: 0; font-family: var(--font); background: var(--bg); font-size: var(--font-size); }
-		main { padding: 16px; }
-		h2 { margin: 0 0 12px; font-weight: 600; }
-		table { width: 100%; border-collapse: collapse; background: white; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
-		th,td { padding: 6px 10px; border: 1px solid var(--border); text-align: left; vertical-align: top; }
-		thead th { background: var(--header-bg); position: sticky; top: 0; z-index: 1; }
-		tbody tr:nth-child(odd) { background: var(--row-alt-bg); }
-		tbody tr:hover { background: var(--row-hover); }
-		.status { font-weight: 600; padding: 2px 6px; border-radius: 4px; display:inline-block; text-transform: capitalize; }
-		.status.pending { background:#fff4cc; color:#856404; }
-		.status.success { background:#d3f9d8; color:#14532d; }
-		.status.error { background:#f8d7da; color:#842029; }
-		pre { margin: 0; white-space: pre-wrap; word-break: break-word; }
-	</style>
-</head>
-<body>
-	<main>
-	<h2>Async tasks</h2>
-
-	{{- if .Tasks }}
-	<table>
-		<thead>
-			<tr>
-				<th style="width:180px;">Created</th>
-				<th style="width:70px;">Seq</th>
-				<th style="width:140px;">Type</th>
-				<th style="width:120px;">Status</th>
-				<th style="width:160px;">Tenant</th>
-				<th style="width:180px;">Done</th>
-				<th style="width:240px;">Result</th>
-				<th>Payload</th>
-			</tr>
-		</thead>
-		<tbody>
-			{{- range .Tasks }}
-			<tr>
-				<td>{{ .Created }}</td>
-				<td>{{ .Seq }}</td>
-				<td>{{ .Type }}</td>
-				<td><span class="status {{ .Status }}">{{ .Status }}</span></td>
-				<td>{{ html .Tenant }}</td>
-				<td>{{ .Done }}</td>
-				<td><pre>{{ html .Result }}</pre></td>
-				<td><pre>{{ html .PayloadJSON }}</pre></td>
-			</tr>
-			{{- end }}
-		</tbody>
-	</table>
-	{{- else }}
-	<p>No async tasks found.</p>
-	{{- end }}
-	</main>
-</body>
-</html>
-`))
-
 func processAsyncTasks(w http.ResponseWriter, r *http.Request) bool {
 	if localStorage == nil {
 		return false // only in local mode
 	}
-	tasks := localStorage.ListAsyncTasks()
 
-	// build lightweight view-model so template logic stays simple
-	type row struct {
-		Seq         uint64
-		Type        string
-		Status      string
-		Tenant      string
-		PayloadJSON string
-		Created     string
-		Done        string
-		Result      string
-	}
-	vm := struct {
-		Tasks []row
-	}{}
-
-	for _, t := range tasks {
-		payloadJSON, _ := json.Marshal(t.Payload)
-
-		createdStr := time.Unix(0, t.CreatedTime).Format(time.RFC3339)
-
-		done := "-"
-		if t.DoneTime > 0 {
-			done = time.Unix(0, t.DoneTime).Format(time.RFC3339)
-		}
-
-		result := t.Error
-		if t.Status == "success" {
-			result = "OK"
-		}
-
-		vm.Tasks = append(vm.Tasks, row{
-			Seq:         t.Seq,
-			Type:        t.Type,
-			Status:      t.Status,
-			Tenant:      t.Tenant,
-			PayloadJSON: string(payloadJSON),
-			Created:     createdStr,
-			Done:        done,
-			Result:      result,
-		})
-	}
-
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := asyncTasksTmpl.Execute(w, vm); err != nil {
-		httpserver.Errorf(w, r, "internal error: %s", err)
+	// Validate version parameter if provided (for protocol compatibility)
+	if version := r.FormValue("version"); version != "" && version != "v1" {
+		httpserver.Errorf(w, r, "unsupported version=%q; want v1", version)
 		return true
 	}
 
+	tasks := localStorage.ListAsyncTasks()
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(tasks); err != nil {
+		httpserver.Errorf(w, r, "internal error: %s", err)
+	}
+	return true
+}
+
+func processInternalDelete(w http.ResponseWriter, r *http.Request) bool {
+	if localStorage == nil {
+		return false // only in local mode
+	}
+
+	// Parse tenant IDs
+	tenantIDsStr := r.FormValue("tenant_ids")
+	tenantIDs, err := logstorage.UnmarshalTenantIDs([]byte(tenantIDsStr))
+	if err != nil {
+		httpserver.Errorf(w, r, "cannot unmarshal tenant_ids=%q: %s", tenantIDsStr, err)
+		return true
+	}
+
+	// Parse timestamp
+	timestampStr := r.FormValue("timestamp")
+	timestamp, err := strconv.ParseInt(timestampStr, 10, 64)
+	if err != nil {
+		httpserver.Errorf(w, r, "cannot parse timestamp=%q: %s", timestampStr, err)
+		return true
+	}
+
+	// Parse query
+	qStr := r.FormValue("query")
+	q, err := logstorage.ParseQueryAtTimestamp(qStr, timestamp)
+	if err != nil {
+		httpserver.Errorf(w, r, "cannot parse query=%q: %s", qStr, err)
+		return true
+	}
+
+	// Execute delete
+	if err := DeleteRows(r.Context(), tenantIDs, q); err != nil {
+		httpserver.Errorf(w, r, "cannot delete rows: %s", err)
+		return true
+	}
+
+	w.Header().Set("Content-Type", "text/plain")
+	w.WriteHeader(http.StatusOK)
 	return true
 }
 
@@ -523,16 +419,37 @@ func GetStreamIDs(ctx context.Context, tenantIDs []logstorage.TenantID, q *logst
 
 // DeleteRows marks rows matching q with the Deleted marker (full or partial) and flushes markers to disk immediately.
 func DeleteRows(ctx context.Context, tenantIDs []logstorage.TenantID, q *logstorage.Query) error {
-	// The query must still be validated for correctness even if the actual delete is a no-op.
 	if err := logstorage.ValidateDeleteQuery(q); err != nil {
 		return fmt.Errorf("validate query: %w", err)
 	}
 
-	if localStorage == nil {
-		return fmt.Errorf("delete is not supported on nodes without local storage (e.g. vlselect)")
+	if localStorage != nil {
+		return localStorage.DeleteRows(ctx, tenantIDs, q)
 	}
 
-	return localStorage.DeleteRows(ctx, tenantIDs, q)
+	return netstorageSelect.DeleteRows(ctx, tenantIDs, q)
+}
+
+// ListAsyncTasks collects async tasks information either from the local storage or from all configured storage nodes.
+// It returns slice with the tasks and an extra Storage field indicating the source node address (or "local" for the embedded storage).
+func ListAsyncTasks(ctx context.Context) ([]logstorage.AsyncTaskInfoWithSource, error) {
+	if localStorage != nil {
+		tasks := localStorage.ListAsyncTasks()
+		out := make([]logstorage.AsyncTaskInfoWithSource, len(tasks))
+		for i, t := range tasks {
+			out[i] = logstorage.AsyncTaskInfoWithSource{
+				AsyncTaskInfo: t,
+				Storage:       "local",
+			}
+		}
+		return out, nil
+	}
+
+	// Remote mode – aggregate across network storage nodes.
+	if netstorageSelect == nil {
+		return nil, nil
+	}
+	return netstorageSelect.ListAsyncTasks(ctx)
 }
 
 func writeStorageMetrics(w io.Writer, strg *logstorage.Storage) {

@@ -86,6 +86,7 @@ func requestHandler(w http.ResponseWriter, r *http.Request) bool {
 			{"select/vmui", "Web UI for VictoriaLogs"},
 			{"metrics", "available service metrics"},
 			{"flags", "command-line flags"},
+			{"select/async_tasks", "async tasks"},
 		})
 		return true
 	}
