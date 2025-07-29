@@ -10,8 +10,8 @@ import (
 // It is intended to be exposed via monitoring endpoints / UI pages.
 type AsyncTaskInfo struct {
 	Seq     uint64             `json:"seq"`
-	Type    string             `json:"type"`
-	Status  string             `json:"status"`
+	Type    asyncTaskType      `json:"type"`
+	Status  asyncTaskStatus    `json:"status"`
 	Tenant  string             `json:"tenant"`
 	Payload asyncDeletePayload `json:"payload"`
 
@@ -85,8 +85,8 @@ func (s *Storage) ListAsyncTasks() []AsyncTaskInfo {
 
 			info := AsyncTaskInfo{
 				Seq:         t.Seq,
-				Type:        asyncTaskTypeString(t.Type),
-				Status:      asyncTaskStatusString(t.Status),
+				Type:        t.Type,
+				Status:      t.Status,
 				Tenant:      tenantStr,
 				Payload:     t.Payload,
 				CreatedTime: t.CreatedTime,
@@ -104,28 +104,4 @@ func (s *Storage) ListAsyncTasks() []AsyncTaskInfo {
 	asyncTasksCache.mu.Unlock()
 
 	return out
-}
-
-func asyncTaskTypeString(tt asyncTaskType) string {
-	switch tt {
-	case asyncTaskDelete:
-		return "delete"
-	case asyncTaskNone:
-		fallthrough
-	default:
-		return "none"
-	}
-}
-
-func asyncTaskStatusString(st asyncTaskStatus) string {
-	switch st {
-	case taskSuccess:
-		return "success"
-	case taskError:
-		return "error"
-	case taskPending:
-		fallthrough
-	default:
-		return "pending"
-	}
 }

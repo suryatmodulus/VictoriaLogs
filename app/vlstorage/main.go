@@ -261,12 +261,6 @@ func processForceFlush(w http.ResponseWriter, r *http.Request) bool {
 }
 
 func processAsyncTasks(w http.ResponseWriter, r *http.Request) bool {
-	// Validate version parameter if provided (for protocol compatibility)
-	if version := r.FormValue("version"); version != "" && version != "v1" {
-		httpserver.Errorf(w, r, "unsupported version=%q; want v1", version)
-		return true
-	}
-
 	// Retrieve async tasks depending on the storage mode (local or remote).
 	tasks, err := ListAsyncTasks(r.Context())
 	if err != nil {

@@ -10,20 +10,20 @@ import (
 
 // asyncTaskType identifies the type of background (asynchronous) task attached to a partition.
 // More types can be added in the future (e.g. compaction, ttl, schema-changes).
-type asyncTaskType int
+type asyncTaskType string
 
 const (
-	asyncTaskNone   asyncTaskType = iota // no task
-	asyncTaskDelete                      // delete rows matching a query
+	asyncTaskNone   asyncTaskType = ""       // no task
+	asyncTaskDelete asyncTaskType = "delete" // delete rows matching a query
 )
 
 // Status field tracks the outcome of the task.
-type asyncTaskStatus int
+type asyncTaskStatus string
 
 const (
-	taskPending asyncTaskStatus = iota
-	taskSuccess
-	taskError
+	taskPending asyncTaskStatus = "pending"
+	taskSuccess asyncTaskStatus = "success"
+	taskError   asyncTaskStatus = "error"
 )
 
 type asyncTask struct {

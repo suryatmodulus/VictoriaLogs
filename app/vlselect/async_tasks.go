@@ -173,8 +173,8 @@ func processAsyncTasksRequest(ctx context.Context, w http.ResponseWriter, r *htt
 
 		vm.Tasks = append(vm.Tasks, row{
 			Storage:     t.Storage,
-			Type:        t.Type,
-			Status:      t.Status,
+			Type:        string(t.Type),
+			Status:      string(t.Status),
 			Tenant:      t.Tenant,
 			PayloadJSON: string(payloadJSON),
 			Created:     createdStr,
