@@ -141,7 +141,7 @@ func (mp *inmemoryPart) MustStoreToDisk(path string) {
 	// Persist delete-marker data if present.
 	if len(mp.deleteMarker.blockIDs) > 0 {
 		datBuf := mp.deleteMarker.Marshal(nil)
-		datPath := filepath.Join(path, rowMarkerDatFilename)
+		datPath := filepath.Join(path, rowDeleteFilename)
 		fs.MustWriteSync(datPath, datBuf)
 	}
 

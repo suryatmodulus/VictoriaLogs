@@ -517,7 +517,7 @@ func (bsw *blockStreamWriter) Finalize(ph *partHeader) {
 			bsw.mp.deleteMarker = bsw.dm
 		} else if bsw.partPath != "" {
 			datBuf := bsw.dm.Marshal(nil)
-			datPath := filepath.Join(bsw.partPath, rowMarkerDatFilename)
+			datPath := filepath.Join(bsw.partPath, rowDeleteFilename)
 			fs.MustWriteSync(datPath, datBuf)
 		}
 	}

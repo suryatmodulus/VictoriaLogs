@@ -143,12 +143,12 @@ func (sr *streamReaders) init(partFormatVersion uint, columnNamesReader, columnI
 
 	sr.messageBloomValuesReader.init(messageBloomValuesReader)
 	sr.oldBloomValuesReader.init(oldBloomValuesReader)
+
 	sr.bloomValuesShards = slicesutil.SetLength(sr.bloomValuesShards, len(bloomValuesShards))
 	for i := range sr.bloomValuesShards {
 		sr.bloomValuesShards[i].init(bloomValuesShards[i])
 	}
 
-	// Read columnNames and columnIdxs
 	if partFormatVersion >= 1 {
 		sr.columnNames, _ = mustReadColumnNames(&sr.columnNamesReader)
 	}
@@ -167,14 +167,12 @@ func (sr *streamReaders) totalBytesRead() uint64 {
 	n += sr.columnsHeaderIndexReader.bytesRead
 	n += sr.columnsHeaderReader.bytesRead
 	n += sr.timestampsReader.bytesRead
+
 	n += sr.messageBloomValuesReader.totalBytesRead()
 	n += sr.oldBloomValuesReader.totalBytesRead()
 	for i := range sr.bloomValuesShards {
 		n += sr.bloomValuesShards[i].totalBytesRead()
 	}
-
-	// markerDatReader is sidecar delete-marker file, not counted in CompressedSizeBytes
-	// of the part header, so skip it from the total.
 
 	return n
 }
@@ -329,22 +327,10 @@ func (bsr *blockStreamReader) MustInitFromInmemoryPart(mp *inmemoryPart) {
 	columnsHeaderReader := mp.columnsHeader.NewReader()
 	timestampsReader := mp.timestamps.NewReader()
 
-	messageBloomValuesReader := bloomValuesStreamReader{
-		bloom:  mp.messageBloomValues.bloom.NewReader(),
-		values: mp.messageBloomValues.values.NewReader(),
-	}
+	messageBloomValuesReader := mp.fieldBloomValues.NewStreamReader()
 	var oldBloomValuesReader bloomValuesStreamReader
-	var bloomValuesShards []bloomValuesStreamReader
-	if bsr.ph.FormatVersion < 1 {
-		oldBloomValuesReader.bloom = mp.fieldBloomValues.bloom.NewReader()
-		oldBloomValuesReader.values = mp.fieldBloomValues.values.NewReader()
-	} else {
-		bloomValuesShards = []bloomValuesStreamReader{
-			{
-				bloom:  mp.fieldBloomValues.bloom.NewReader(),
-				values: mp.fieldBloomValues.values.NewReader(),
-			},
-		}
+	bloomValuesShards := []bloomValuesStreamReader{
+		mp.fieldBloomValues.NewStreamReader(),
 	}
 
 	bsr.streamReaders.init(bsr.ph.FormatVersion, columnNamesReader, columnIdxsReader, metaindexReader, indexReader,
@@ -372,7 +358,7 @@ func (bsr *blockStreamReader) MustInitFromFilePart(path string) {
 
 	columnNamesPath := filepath.Join(path, columnNamesFilename)
 	columnIdxsPath := filepath.Join(path, columnIdxsFilename)
-	markerDatPath := filepath.Join(path, rowMarkerDatFilename)
+	deleteRowsPath := filepath.Join(path, rowDeleteFilename)
 	metaindexPath := filepath.Join(path, metaindexFilename)
 	indexPath := filepath.Join(path, indexFilename)
 	columnsHeaderIndexPath := filepath.Join(path, columnsHeaderIndexFilename)
@@ -402,8 +388,8 @@ func (bsr *blockStreamReader) MustInitFromFilePart(path string) {
 
 	// Open marker readers - check if files exist first
 	var markerDatReader filestream.ReadCloser
-	if fs.IsPathExist(markerDatPath) {
-		pfo.Add(markerDatPath, &markerDatReader, nocache)
+	if fs.IsPathExist(deleteRowsPath) {
+		pfo.Add(deleteRowsPath, &markerDatReader, nocache)
 	}
 
 	var columnsHeaderIndexReader filestream.ReadCloser

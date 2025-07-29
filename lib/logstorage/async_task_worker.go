@@ -14,21 +14,18 @@ import (
 // tasks by re-executing their underlying queries via MarkRows (with
 // createTask=false).
 func (s *Storage) startAsyncTaskWorker() {
+	const interval = 5 * time.Second
+	const maxFailure = 3
+
 	s.wg.Add(1)
-	const duration = 5 * time.Second
 	go func() {
 		defer s.wg.Done()
 		ctx := context.Background()
 
-		logger.Infof("DEBUG (task): start async task worker")
-
-		timer := time.NewTimer(duration)
+		timer := time.NewTimer(interval)
 		defer timer.Stop()
 
-		const maxFailedTime = 3
-		var failedTime int
-
-		for {
+		for failedTime := 0; ; {
 			select {
 			case <-s.stopCh:
 				// Drain the timer channel if needed before returning
@@ -38,8 +35,8 @@ func (s *Storage) startAsyncTaskWorker() {
 				return
 			case <-timer.C:
 				// Honour pause requests, if any. If cannot process, just reset timer and continue.
-				if !s.asyncTaskState.canProcess() {
-					timer.Reset(5 * time.Second)
+				if !s.asyncTaskState.isPaused() {
+					timer.Reset(interval)
 					continue
 				}
 
@@ -51,13 +48,13 @@ func (s *Storage) startAsyncTaskWorker() {
 					failedTime = 0
 				}
 
-				if failedTime > maxFailedTime {
+				if failedTime > maxFailure {
 					s.failAsyncTask(seq, err)
 					failedTime = 0
 				}
 
 				// Start the 5-second wait *after* the task completes
-				timer.Reset(duration)
+				timer.Reset(interval)
 			}
 		}
 	}()
@@ -135,7 +132,6 @@ func (s *Storage) runAsyncTasksOnce(ctx context.Context) (uint64, error) {
 		s.setTaskAsDone(oudatedPtws, task.Seq, taskSuccess, false, nil)
 		return seq, nil
 	}
-
 	defer func() {
 		for _, pw := range lagging {
 			pw.decRef()
@@ -177,7 +173,6 @@ func (s *Storage) failAsyncTask(sequence uint64, err error) {
 
 	// Mark the tasks as error for partitions and parts
 	s.setTaskAsDone(ptws, sequence, taskError, true, err)
-
 	for _, ptw := range ptws {
 		ptw.decRef()
 	}

@@ -195,12 +195,12 @@ func (ats *asyncTaskState) doneWaiter() {
 	}
 }
 
-// canProcess returns true if the async-task worker may proceed with work. If
+// isPaused returns true if the async-task worker may proceed with work. If
 // there are active waiters, it closes the channel to acknowledge the pause and
 // returns false.
-func (ats *asyncTaskState) canProcess() bool {
+func (ats *asyncTaskState) isPaused() bool {
 	if ats.waiter.Load() == 0 {
-		return true
+		return false
 	}
 
 	ats.mu.Lock()
@@ -210,7 +210,7 @@ func (ats *asyncTaskState) canProcess() bool {
 	}
 	ats.mu.Unlock()
 
-	return false
+	return true
 }
 
 type partitionWrapper struct {
@@ -835,6 +835,13 @@ func ValidateDeleteQuery(q *Query) error {
 	logger.Infof("DEBUG: query: %s, maxTS: %d, now: %d", q.String(), maxTS/1e9, now)
 	return nil
 }
+
+// taskSeq provides unique, monotonically increasing sequence numbers for async tasks.
+var taskSeq = func() *atomic.Uint64 {
+	var x atomic.Uint64
+	x.Store(uint64(time.Now().UnixNano()))
+	return &x
+}()
 
 // DeleteRows schedules deletion of log rows matching the query filter for the specified tenants.
 // The actual deletion is performed by background workers to avoid blocking the caller.

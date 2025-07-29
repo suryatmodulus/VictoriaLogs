@@ -132,11 +132,3 @@ func (at *asyncTasks) addDeleteTaskSync(tenantIDs []TenantID, q *Query, seq uint
 	at.pt.mustSaveAsyncTasks()
 	return seq
 }
-
-// taskSeq provides unique, monotonically increasing sequence numbers for async tasks.
-var taskSeq atomic.Uint64
-
-func init() {
-	// Initialise with current unix-nano in order to minimise collision with seqs that may be present on disk.
-	taskSeq.Store(uint64(time.Now().UnixNano()))
-}

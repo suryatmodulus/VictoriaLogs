@@ -118,7 +118,7 @@ func mustOpenFilePart(pt *partition, path string) *part {
 
 	columnNamesPath := filepath.Join(path, columnNamesFilename)
 	columnIdxsPath := filepath.Join(path, columnIdxsFilename)
-	markerDatPath := filepath.Join(path, rowMarkerDatFilename)
+	markerDatPath := filepath.Join(path, rowDeleteFilename)
 	metaindexPath := filepath.Join(path, metaindexFilename)
 	indexPath := filepath.Join(path, indexFilename)
 	columnsHeaderIndexPath := filepath.Join(path, columnsHeaderIndexFilename)
