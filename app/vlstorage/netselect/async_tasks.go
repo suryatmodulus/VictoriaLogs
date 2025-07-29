@@ -13,10 +13,16 @@ import (
 
 // ListAsyncTasks gathers all async tasks from every storage node and returns them along with the originating storage address.
 func (s *Storage) ListAsyncTasks(ctx context.Context) ([]logstorage.AsyncTaskInfoWithSource, error) {
-	// Fast-path for mis-configured storage
+	// Fast-path for mis-configured storage.
 	if len(s.sns) == 0 {
 		return nil, nil
 	}
+
+	// Derive a cancelable context so that we can abort all in-flight
+	// requests as soon as the first error is encountered. This prevents
+	// returning partial results and avoids wasting resources.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
 	// Aggregate tasks from all storage nodes.
 	outCh := make(chan []logstorage.AsyncTaskInfoWithSource, len(s.sns))
@@ -26,10 +32,16 @@ func (s *Storage) ListAsyncTasks(ctx context.Context) ([]logstorage.AsyncTaskInf
 		go func(sn *storageNode) {
 			tasks, err := sn.getAsyncTasks(ctx)
 			if err != nil {
-				errCh <- err
+				select {
+				case errCh <- err:
+				default:
+				}
 				return
 			}
-			outCh <- tasks
+			select {
+			case outCh <- tasks:
+			default:
+			}
 		}(sn)
 	}
 
@@ -39,6 +51,8 @@ func (s *Storage) ListAsyncTasks(ctx context.Context) ([]logstorage.AsyncTaskInf
 		case tasks := <-outCh:
 			result = append(result, tasks...)
 		case err := <-errCh:
+			// Cancel the context to abort outstanding requests.
+			cancel()
 			return nil, err
 		case <-ctx.Done():
 			return nil, ctx.Err()

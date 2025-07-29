@@ -428,7 +428,7 @@ func DeleteRows(ctx context.Context, tenantIDs []logstorage.TenantID, q *logstor
 // ListAsyncTasks collects async tasks information either from the local storage or from all configured storage nodes.
 // It returns slice with the tasks and an extra Storage field indicating the source node address (or "local" for the embedded storage).
 func ListAsyncTasks(ctx context.Context) ([]logstorage.AsyncTaskInfoWithSource, error) {
-	if localStorage == nil {
+	if localStorage != nil {
 		tasks := localStorage.ListAsyncTasks()
 		out := make([]logstorage.AsyncTaskInfoWithSource, len(tasks))
 		for i, t := range tasks {
