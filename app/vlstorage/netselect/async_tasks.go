@@ -23,15 +23,14 @@ func (s *Storage) ListAsyncTasks(ctx context.Context) ([]logstorage.AsyncTaskInf
 	errCh := make(chan error, len(s.sns))
 
 	for _, sn := range s.sns {
-		sn := sn // capture
-		go func() {
+		go func(sn *storageNode) {
 			tasks, err := sn.getAsyncTasks(ctx)
 			if err != nil {
 				errCh <- err
 				return
 			}
 			outCh <- tasks
-		}()
+		}(sn)
 	}
 
 	var result []logstorage.AsyncTaskInfoWithSource
@@ -77,18 +76,16 @@ func (sn *storageNode) getAsyncTasks(ctx context.Context) ([]logstorage.AsyncTas
 		return nil, fmt.Errorf("unexpected status code for %q: %d; response: %q", reqURL, resp.StatusCode, body)
 	}
 
-	var tasks []logstorage.AsyncTaskInfo
+	var tasks []logstorage.AsyncTaskInfoWithSource
 	if err := json.Unmarshal(body, &tasks); err != nil {
 		return nil, fmt.Errorf("cannot decode async tasks response from %q: %w; response body: %q", reqURL, err, body)
 	}
 
 	// Attach origin address.
-	out := make([]logstorage.AsyncTaskInfoWithSource, len(tasks))
-	for i, t := range tasks {
-		out[i] = logstorage.AsyncTaskInfoWithSource{
-			AsyncTaskInfo: t,
-			Storage:       sn.addr,
+	for i := range tasks {
+		if tasks[i].Storage == "" {
+			tasks[i].Storage = sn.addr
 		}
 	}
-	return out, nil
+	return tasks, nil
 }

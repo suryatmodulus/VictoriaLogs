@@ -223,7 +223,6 @@ func decRequestConcurrency() {
 
 // processDeleteSelectRequest handles "/select/delete" endpoint by proxying to internal delete.
 func processDeleteSelectRequest(ctx context.Context, w http.ResponseWriter, r *http.Request) {
-	// Extract tenant ID and query parameters the same way as internal delete.
 	tenantID, err := logstorage.GetTenantIDFromRequest(r)
 	if err != nil {
 		httpserver.Errorf(w, r, "cannot obtain tenantID: %s", err)
@@ -305,7 +304,6 @@ func processSelectRequest(ctx context.Context, w http.ResponseWriter, r *http.Re
 		logsql.ProcessStreamsRequest(ctx, w, r)
 		logsqlStreamsDuration.UpdateDuration(startTime)
 		return true
-
 	default:
 		return false
 	}

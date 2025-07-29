@@ -261,17 +261,18 @@ func processForceFlush(w http.ResponseWriter, r *http.Request) bool {
 }
 
 func processAsyncTasks(w http.ResponseWriter, r *http.Request) bool {
-	if localStorage == nil {
-		return false // only in local mode
-	}
-
 	// Validate version parameter if provided (for protocol compatibility)
 	if version := r.FormValue("version"); version != "" && version != "v1" {
 		httpserver.Errorf(w, r, "unsupported version=%q; want v1", version)
 		return true
 	}
 
-	tasks := localStorage.ListAsyncTasks()
+	// Retrieve async tasks depending on the storage mode (local or remote).
+	tasks, err := ListAsyncTasks(r.Context())
+	if err != nil {
+		httpserver.Errorf(w, r, "cannot list async tasks: %s", err)
+		return true
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(tasks); err != nil {
@@ -433,7 +434,7 @@ func DeleteRows(ctx context.Context, tenantIDs []logstorage.TenantID, q *logstor
 // ListAsyncTasks collects async tasks information either from the local storage or from all configured storage nodes.
 // It returns slice with the tasks and an extra Storage field indicating the source node address (or "local" for the embedded storage).
 func ListAsyncTasks(ctx context.Context) ([]logstorage.AsyncTaskInfoWithSource, error) {
-	if localStorage != nil {
+	if localStorage == nil {
 		tasks := localStorage.ListAsyncTasks()
 		out := make([]logstorage.AsyncTaskInfoWithSource, len(tasks))
 		for i, t := range tasks {
@@ -445,10 +446,6 @@ func ListAsyncTasks(ctx context.Context) ([]logstorage.AsyncTaskInfoWithSource, 
 		return out, nil
 	}
 
-	// Remote mode – aggregate across network storage nodes.
-	if netstorageSelect == nil {
-		return nil, nil
-	}
 	return netstorageSelect.ListAsyncTasks(ctx)
 }
 
